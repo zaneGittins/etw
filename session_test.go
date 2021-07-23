@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/sys/windows"
 
-	"github.com/bi-zone/etw"
+	"github.com/Velocidex/etw"
 )
 
 func TestSession(t *testing.T) {

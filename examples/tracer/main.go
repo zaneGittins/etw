@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/bi-zone/etw"
+	"github.com/Velocidex/etw"
 )
 
 func main() {
