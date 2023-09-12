@@ -1,4 +1,5 @@
-//+build windows
+//go:build windows
+// +build windows
 
 // Package etw allows you to receive Event Tracing for Windows (ETW) events.
 //
@@ -60,6 +61,43 @@ type Session struct {
 	propertiesBuf  []byte
 }
 
+const KernelLoggerName = "NT Kernel Logger"
+
+// Translated from https://github.com/mandiant/SilkETW/blob/093f57201525343d4ebd3d9be33f4c6a1a425ed5/SilkETW/h_SilkETW.cs#L96.
+var KernelKeywords = map[string]uint64{
+	"Process":                     C.EVENT_TRACE_FLAG_PROCESS,            // Logs process starts and stops.
+	"Thread":                      C.EVENT_TRACE_FLAG_THREAD,             // Logs threads starts and stops.
+	"ImageLoad":                   C.EVENT_TRACE_FLAG_IMAGE_LOAD,         // Logs native modules loads (LoadLibrary), and unloads.
+	"ProcessCounters":             C.EVENT_TRACE_FLAG_PROCESS_COUNTERS,   // Logs process performance counters (TODO When?) (Vista+ only) see KernelTraceEventParser.ProcessPerfCtr.
+	"Interrupt":                   C.EVENT_TRACE_FLAG_INTERRUPT,          // Log hardware interrupts. (Vista+ only),
+	"SystemCall":                  C.EVENT_TRACE_FLAG_SYSTEMCALL,         // Log calls to the OS (Vista+ only) This is VERY volumous (can be > 100K events).
+	"DiskIO":                      C.EVENT_TRACE_FLAG_DISK_IO,            // Logs the completion of Physical disk activity.
+	"DiskFileIO":                  C.EVENT_TRACE_FLAG_DISK_FILE_IO,       // Logs the mapping of file IDs to actual (kernel) file names.
+	"DiskIOInit":                  C.EVENT_TRACE_FLAG_DISK_IO_INIT,       // Log Disk operations (Vista+ only) Generally not TOO volumous..
+	"Dispatcher":                  C.EVENT_TRACE_FLAG_DISPATCHER,         // Thread Dispatcher (ReadyThread) (Vista+ only) (can be > 10K events per second).
+	"Memory":                      C.EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS, // Logs all page faults (hard or soft) Can be pretty volumous (> 1K per second).
+	"MemoryHardFaults":            C.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS, // Logs all page faults that must fetch the data from the disk (hard faults).
+	"VirtualAlloc":                C.EVENT_TRACE_FLAG_VIRTUAL_ALLOC,      // Log Virtual Alloc calls and VirtualFree. (Vista+ Only) Generally not TOO volumous.
+	"VAMap":                       C.EVENT_TRACE_FLAG_VAMAP,              // Log mapping of files into memmory (Win8 and above Only) Generally low volume.
+	"NetworkTCPIP":                C.EVENT_TRACE_FLAG_NETWORK_TCPIP,      // Logs TCP/IP network send and receive events.
+	"Registry":                    C.EVENT_TRACE_FLAG_REGISTRY,           // Logs activity to the windows registry. Can be pretty volumous (> 1K per second)
+	"AdvancedLocalProcedureCalls": C.EVENT_TRACE_FLAG_ALPC,               // Logs Advanced Local Procedure call events.
+	"SplitIO":                     C.EVENT_TRACE_FLAG_SPLIT_IO,           // Disk I/O that was split (eg because of mirroring requirements) (Vista+ only)
+	"Handle":                      0x400000,                              // Handle creation and closing (for handle leaks)
+	"Driver":                      C.EVENT_TRACE_FLAG_DRIVER,             // Device Driver logging (Vista+ only)
+	"OS":                          0xb00060,                              // You mostly don't care about these unless you are dealing with OS internals.
+	"Profile":                     C.EVENT_TRACE_FLAG_PROFILE,            //Sampled based profiling (every msec) (Vista+ only) (expect 1K events per proc
+	"FileIO":                      C.EVENT_TRACE_FLAG_FILE_IO,            // log file FileOperationEnd (has status code) when they complete (even ones that do not actually cause Disk I/O)
+	"FileIOInit":                  C.EVENT_TRACE_FLAG_FILE_IO_INIT,       // log the start of the File I/O operation as well as the end. (Vista+ only) Generally not too voluminous.
+	"All":                         0x7b3ffff,                             // All events.
+}
+
+var KernelLoggerGUID windows.GUID
+
+func init() {
+	KernelLoggerGUID, _ = windows.GUIDFromString("9e814aad-3204-11d2-9a82-006008a86939")
+}
+
 // EventCallback is any function that could handle an ETW event. EventCallback
 // is called synchronously and sequentially on every event received by Session
 // one by one.
@@ -107,6 +145,12 @@ func NewSession(providerGUID windows.GUID, options ...Option) (*Session, error) 
 	return &s, nil
 }
 
+func NewKernelSession(options ...Option) (*Session, error) {
+	options = append(options, WithName(KernelLoggerName))
+	options = append(options, withKernelSession())
+	return NewSession(KernelLoggerGUID, options...)
+}
+
 // Process starts processing of ETW events. Events will be passed to @cb
 // synchronously and sequentially. Take a look to EventCallback documentation
 // for more info about events processing.
@@ -115,8 +159,10 @@ func NewSession(providerGUID windows.GUID, options ...Option) (*Session, error) 
 func (s *Session) Process(cb EventCallback) error {
 	s.callback = cb
 
-	if err := s.subscribeToProvider(); err != nil {
-		return fmt.Errorf("failed to subscribe to provider; %w", err)
+	if !s.config.kernelSession {
+		if err := s.subscribeToProvider(); err != nil {
+			return fmt.Errorf("failed to subscribe to provider; %w", err)
+		}
 	}
 
 	cgoKey := newCallbackKey(s)
@@ -146,12 +192,23 @@ func (s *Session) UpdateOptions(options ...Option) error {
 func (s *Session) Close() error {
 	// "Be sure to disable all providers before stopping the session."
 	// https://docs.microsoft.com/en-us/windows/win32/etw/configuring-and-starting-an-event-tracing-session
-	if err := s.unsubscribeFromProvider(); err != nil {
-		return fmt.Errorf("failed to disable provider; %w", err)
-	}
 
-	if err := s.stopSession(); err != nil {
-		return fmt.Errorf("failed to stop session; %w", err)
+	if s.config.kernelSession {
+
+		// This is how Microsoft ends a kernel session in example code since there is no EnableTraceEx2 for kernel.
+		// https://learn.microsoft.com/en-us/windows/win32/etw/configuring-and-starting-the-nt-kernel-logger-session
+		if err := KillSession(KernelLoggerName); err != nil {
+			return fmt.Errorf("failed to kill session; %w", err)
+		}
+	} else {
+
+		if err := s.unsubscribeFromProvider(); err != nil {
+			return fmt.Errorf("failed to disable provider; %w", err)
+		}
+
+		if err := s.stopSession(); err != nil {
+			return fmt.Errorf("failed to stop session; %w", err)
+		}
 	}
 	return nil
 }
@@ -227,6 +284,10 @@ func (s *Session) createETWSession() error {
 	pProperties.Wnode.BufferSize = C.ulong(bufSize)
 	pProperties.Wnode.ClientContext = 1 // QPC for event Timestamp
 	pProperties.Wnode.Flags = C.WNODE_FLAG_TRACED_GUID
+
+	if s.config.kernelSession {
+		pProperties.EnableFlags = C.ulong(s.config.KernelEnableFlags)
+	}
 
 	// Mark that we are going to process events in real time using a callback.
 	pProperties.LogFileMode = C.EVENT_TRACE_REAL_TIME_MODE

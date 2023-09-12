@@ -1,4 +1,7 @@
-//+build windows
+//go:build windows
+// +build windows
+
+// Kernel session - credit to https://github.com/zdandoh/etw. Small modifications by zaneGittins.
 
 package etw
 
@@ -55,6 +58,9 @@ type SessionOptions struct {
 	// original API reference:
 	// https://docs.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-enable_trace_parameters
 	EnableProperties []EnableProperty
+
+	kernelSession     bool
+	KernelEnableFlags uint64
 }
 
 // Option is any function that modifies SessionOptions. Options will be called
@@ -69,6 +75,32 @@ func WithName(name string) Option {
 	return func(cfg *SessionOptions) {
 		cfg.Name = name
 	}
+}
+
+func withKernelSession() Option {
+	return func(cfg *SessionOptions) {
+		cfg.kernelSession = true
+	}
+}
+
+func WithKernelEnableFlags(flags uint64) Option {
+	return func(cfg *SessionOptions) {
+		cfg.KernelEnableFlags = flags
+	}
+}
+
+func WithKernelKeyword(keyword string) Option {
+
+	if val, ok := KernelKeywords[keyword]; ok {
+		return func(cfg *SessionOptions) {
+			cfg.KernelEnableFlags = val
+		}
+	} else {
+		return func(cfg *SessionOptions) {
+			cfg.KernelEnableFlags = 0
+		}
+	}
+
 }
 
 // WithLevel specifies a maximum level consumer is interested in. Higher levels
